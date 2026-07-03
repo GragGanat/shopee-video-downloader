@@ -13,6 +13,9 @@ COPY . .
 # Install dependencies
 RUN pnpm install --frozen-lockfile || pnpm install
 
+# Install Playwright and its system dependencies
+RUN npx playwright install --with-deps chromium
+
 # Build the project
 RUN pnpm run build
 
