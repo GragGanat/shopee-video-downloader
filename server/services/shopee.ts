@@ -23,77 +23,112 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   const page = await context.newPage();
 
   try {
-    // 1. Load the page to bypass security and get cookies
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForTimeout(3000);
-
-    const finalUrl = page.url();
-    const domain = new URL(finalUrl).hostname; // e.g., shopee.com.my or shopee.co.id
-
     let bestUrl = '';
     let title = 'Shopee Video';
     let cover = '';
     let desc = '';
 
-    // 2. Try to extract Shop ID and Item ID for a Direct API Call (For Product Pages)
-    const match = finalUrl.match(/-i\.(\d+)\.(\d+)/) || finalUrl.match(/shop\/(\d+)\/item\/(\d+)/);
-    
-    if (match && match.length === 3) {
-      const shopId = match[1];
-      const itemId = match[2];
-      
-      // Force an API call from inside the browser to bypass CORS
-      const apiData = await page.evaluate(async ({ domain, shopId, itemId }) => {
-        try {
-          const res = await fetch(`https://${domain}/api/v4/item/get?itemid=${itemId}&shopid=${shopId}` );
-          return await res.json();
-        } catch (e) { return null; }
-      }, { domain, shopId, itemId });
+    // METHOD 1: Network Interception
+    page.on('response', async (response) => {
+      try {
+        const reqUrl = response.url();
+        if (reqUrl.includes('api/v4') && response.request().resourceType() === 'fetch') {
+          const body = await response.json().catch(() => null);
+          if (body) {
+            const formats = body?.data?.video_info_list?.[0]?.formats || body?.data?.formats || body?.data?.video?.formats;
+            if (formats && Array.isArray(formats)) {
+              const clean = formats.find(f => f.url && !f.url.includes('.default.mp4'));
+              if (clean) bestUrl = clean.url;
+            }
+            if (!bestUrl) {
+              const vUrl = body?.data?.video_info_list?.[0]?.video_url || body?.data?.video_url || body?.data?.video?.video_url;
+              if (vUrl) bestUrl = vUrl;
+            }
+            if (body?.data?.title || body?.data?.name) title = body.data.title || body.data.name;
+          }
+        }
+      } catch (e) {}
+    });
 
-      if (apiData?.data?.video_info_list?.[0]) {
-        const videoInfo = apiData.data.video_info_list[0];
-        title = apiData.data.name || title;
-        desc = apiData.data.description || desc;
-        cover = apiData.data.image ? `https://cf.shopee.com/file/${apiData.data.image}` : cover;
-        
-        // Grab the unwatermarked video from the hidden formats array
-        if (videoInfo.formats && videoInfo.formats.length > 0 ) {
-          const cleanFormats = videoInfo.formats.filter((f: any) => f.url && !f.url.includes('.default.mp4'));
-          bestUrl = cleanFormats.length > 0 ? cleanFormats[0].url : videoInfo.formats[0].url;
-        } else {
-          bestUrl = videoInfo.video_url;
+    // Load the page and wait for network to settle
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
+    await page.waitForTimeout(3000);
+
+    const finalUrl = page.url();
+    const domain = new URL(finalUrl).hostname;
+
+    // METHOD 2: Direct API Fetch (For Shopee Video Links)
+    if (!bestUrl) {
+      const videoIdMatch = finalUrl.match(/video_id=([^&]+)/) || finalUrl.match(/answers\/(\d+)/);
+      if (videoIdMatch && videoIdMatch[1]) {
+        const videoId = videoIdMatch[1];
+        const apiData = await page.evaluate(async ({ domain, videoId }) => {
+          try {
+            const res = await fetch(`https://${domain}/api/v4/video/get_video_detail?video_id=${videoId}` );
+            return await res.json();
+          } catch (e) { return null; }
+        }, { domain, videoId });
+
+        if (apiData?.data?.formats) {
+          const clean = apiData.data.formats.find((f: any) => f.url && !f.url.includes('.default.mp4'));
+          bestUrl = clean ? clean.url : apiData.data.formats[0].url;
+        } else if (apiData?.data?.video_url) {
+          bestUrl = apiData.data.video_url;
         }
       }
     }
 
-    // 3. If API failed or it's a Shopee Video link, scrape the raw HTML for hidden JSON state
+    // METHOD 3: Direct API Fetch (For Product Links)
     if (!bestUrl) {
-      const html = await page.content();
-      
-      // Regex to find the hidden "formats" array in Shopee's injected SSR scripts
-      const formatsMatch = html.match(/"formats":\s*\[\s*\{\s*"url":\s*"([^"]+)"/);
-      if (formatsMatch && formatsMatch[1]) {
-        // Clean up escaped slashes (e.g., https:\/\/... )
-        bestUrl = formatsMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
-      } else {
-        // Absolute Fallback: Grab whatever is in the video tag
-        const domResult = await page.evaluate(() => {
-          const videoEl = document.querySelector('video');
-          return {
-            url: videoEl ? (videoEl.src || videoEl.getAttribute('data-src') || videoEl.querySelector('source')?.getAttribute('src')) : null,
-            title: (document.querySelector('meta[property="og:title"]') as HTMLMetaElement)?.content,
-            cover: (document.querySelector('meta[property="og:image"]') as HTMLMetaElement)?.content
-          };
-        });
-        bestUrl = domResult.url || '';
-        title = domResult.title || title;
-        cover = domResult.cover || cover;
+      const itemMatch = finalUrl.match(/-i\.(\d+)\.(\d+)/) || finalUrl.match(/shop\/(\d+)\/item\/(\d+)/);
+      if (itemMatch && itemMatch.length === 3) {
+        const shopId = itemMatch[1];
+        const itemId = itemMatch[2];
+        const apiData = await page.evaluate(async ({ domain, shopId, itemId }) => {
+          try {
+            const res = await fetch(`https://${domain}/api/v4/item/get?itemid=${itemId}&shopid=${shopId}` );
+            return await res.json();
+          } catch (e) { return null; }
+        }, { domain, shopId, itemId });
+
+        const vInfo = apiData?.data?.video_info_list?.[0];
+        if (vInfo?.formats) {
+          const clean = vInfo.formats.find((f: any) => f.url && !f.url.includes('.default.mp4'));
+          bestUrl = clean ? clean.url : vInfo.formats[0].url;
+        } else if (vInfo?.video_url) {
+          bestUrl = vInfo.video_url;
+        }
       }
     }
 
+    // METHOD 4: HTML Regex Scrape
     if (!bestUrl) {
-      throw new Error('Could not extract video data from this Shopee link.');
+      const html = await page.content();
+      const formatsMatch = html.match(/"formats":\s*\[(.*?)\]/);
+      if (formatsMatch) {
+        const urls = formatsMatch[1].match(/"url":\s*"([^"]+)"/g);
+        if (urls) {
+          const cleanUrls = urls.map(u => u.replace(/"url":\s*"/, '').replace('"', '').replace(/\\u002F/g, '/').replace(/\\/g, ''));
+          const unwatermarked = cleanUrls.find(u => !u.includes('.default.mp4'));
+          bestUrl = unwatermarked || cleanUrls[0];
+        }
+      }
     }
+
+    // METHOD 5: Fallback to DOM
+    if (!bestUrl) {
+      bestUrl = await page.evaluate(() => {
+        const videoEl = document.querySelector('video');
+        return videoEl ? (videoEl.src || videoEl.getAttribute('data-src') || videoEl.querySelector('source')?.getAttribute('src') || '') : '';
+      });
+    }
+
+    if (!bestUrl) {
+      throw new Error('Could not extract video data from this Shopee link. The video may be private or unavailable.');
+    }
+
+    // Final Watermark Scrub
+    bestUrl = bestUrl.replace('.default.mp4', '.mp4');
 
     return {
       videoUrl: bestUrl,
