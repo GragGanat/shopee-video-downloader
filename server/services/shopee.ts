@@ -8,6 +8,15 @@ interface VideoResult {
   desc: string;
 }
 
+interface VideoDataMatch {
+  url: string;
+  title?: string;
+  author?: string;
+  cover?: string;
+  desc?: string;
+  score?: number;
+}
+
 // Global browser instance
 let globalBrowser: Browser | null = null;
 
@@ -96,12 +105,6 @@ function cleanWatermarkUrl(url: string): string {
 }
 
 function analyzeCapturedResponses(responses: any[]): VideoResult | null {
-  let bestUrl = '';
-  let title = 'Shopee Video';
-  let author = 'Unknown';
-  let cover = '';
-  let desc = '';
+  const allFoundVideos: VideoDataMatch[] = [];
 
-  const potentialUrls: { url: string, score: number }[] = [];
-
-  function
+  
