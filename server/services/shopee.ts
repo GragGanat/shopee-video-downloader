@@ -196,4 +196,3 @@ async function executeExtraction(shopeeUrl: string, proxyUrl: string | null): Pr
   cacheVideo(shopeeUrl, result);
   return result;
 }
-
