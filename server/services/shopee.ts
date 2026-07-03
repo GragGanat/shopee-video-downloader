@@ -20,41 +20,21 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
 
     console.log(`[4] Sending URL to SVXtract API...`);
     
-    let apiRes;
-    let data;
-    
-    try {
-      // ATTEMPT 1: Send as JSON Payload
-      console.log(`[4a] Trying JSON format...`);
-      apiRes = await axios.post('https://svxtract.com/apiv3.php', { url: url }, {
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64 ) AppleWebKit/537.36',
-          'Origin': 'https://svxtract.com',
-          'Referer': 'https://svxtract.com/',
-          'Cookie': cookieString,
-          'X-Requested-With': 'XMLHttpRequest'
-        }
-      } );
-      data = apiRes.data;
-    } catch (e: any) {
-      // ATTEMPT 2: Send as Multipart Form Data
-      console.log(`[4b] JSON failed. Trying Multipart Form Data...`);
-      const formData = new FormData();
-      formData.append('url', url);
-      
-      apiRes = await axios.post('https://svxtract.com/apiv3.php', formData, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64 ) AppleWebKit/537.36',
-          'Origin': 'https://svxtract.com',
-          'Referer': 'https://svxtract.com/',
-          'Cookie': cookieString,
-          'X-Requested-With': 'XMLHttpRequest'
-        }
-      } );
-      data = apiRes.data;
-    }
+    // Using URLSearchParams directly forces Axios to send perfect application/x-www-form-urlencoded data
+    const params = new URLSearchParams();
+    params.append('url', url);
 
+    const apiRes = await axios.post('https://svxtract.com/apiv3.php', params, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64 ) AppleWebKit/537.36',
+        'Origin': 'https://svxtract.com',
+        'Referer': 'https://svxtract.com/',
+        'Cookie': cookieString,
+        'X-Requested-With': 'XMLHttpRequest'
+      }
+    } );
+
+    const data = apiRes.data;
     console.log(`[5] API Response received!`);
     
     let videoUrl = '';
