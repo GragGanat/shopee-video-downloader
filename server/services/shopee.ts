@@ -44,7 +44,7 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   try {
     // STEP 1: Resolve the Shopee shortlink
     console.log(`[2] Resolving Shopee shortlink...`);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(2000); // Give it a moment to redirect
     
     const resolvedUrl = page.url();
@@ -52,7 +52,8 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
 
     // STEP 2: Go to SVXtract
     console.log(`[4] Navigating to SVXtract...`);
-    await page.goto('https://svxtract.com/', { waitUntil: 'domcontentloaded', timeout: 15000 } );
+    // INCREASED TIMEOUT TO 60 SECONDS
+    await page.goto('https://svxtract.com/', { waitUntil: 'domcontentloaded', timeout: 60000 } );
 
     console.log(`[5] Typing URL into the input box...`);
     await page.fill('input[type="text"], input[type="url"], input[name="url"]', resolvedUrl);
@@ -62,7 +63,7 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
     // Start listening for their backend API response
     const responsePromise = page.waitForResponse(
       response => response.url().includes('apiv3.php') || response.url().includes('api'),
-      { timeout: 20000 }
+      { timeout: 60000 }
     ).catch(() => null);
 
     // Click the download button
@@ -80,7 +81,6 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
       console.log(`[7] Intercepted SVXtract API Response!`);
       const data = await apiResponse.json().catch(() => null);
       
-      // LOG THE EXACT RESPONSE SO WE CAN DEBUG IT!
       console.log(`[7] API Data:`, data ? JSON.stringify(data).substring(0, 300) : 'null');
       
       if (data) {
@@ -94,7 +94,7 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
     // Fallback: If API interception fails, wait for the DOM to show the download button
     if (!videoUrl) {
       console.log(`[8] API interception failed or empty. Waiting for DOM to update...`);
-      await page.waitForSelector('a[href*=".mp4"], video source[src*=".mp4"]', { timeout: 15000 });
+      await page.waitForSelector('a[href*=".mp4"], video source[src*=".mp4"]', { timeout: 60000 });
       
       videoUrl = await page.evaluate(() => {
         const a = document.querySelector('a[href*=".mp4"]');
