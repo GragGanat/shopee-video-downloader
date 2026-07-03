@@ -2,6 +2,39 @@ import axios from 'axios';
 
 interface VideoResult { videoUrl: string; title: string; cover: string; author: string; desc: string; }
 
+// Quality priority order: highest resolution first, H264 preferred over H265 for compatibility
+const QUALITY_PRIORITY = [
+  'V1280P',
+  'V1080P',
+  'V1080P_H265',
+  'V720P',
+  'V720P_H265',
+  'V540P',
+  'V540P_H265',
+  'V480P',
+  'V360P',
+];
+
+function getBestStream(streams: any[]): string {
+  if (!streams || streams.length === 0) return '';
+
+  // Sort streams by quality priority (highest first)
+  const sorted = [...streams].sort((a, b) => {
+    const aIndex = QUALITY_PRIORITY.indexOf(a.quality);
+    const bIndex = QUALITY_PRIORITY.indexOf(b.quality);
+    // If quality not in our list, push to the end
+    const aScore = aIndex === -1 ? 999 : aIndex;
+    const bScore = bIndex === -1 ? 999 : bIndex;
+    return aScore - bScore;
+  });
+
+  console.log(`[5] Available streams:`);
+  sorted.forEach(s => console.log(`    - ${s.quality} (${s.codec}): ${s.stream_url.substring(0, 60)}...`));
+  console.log(`[5] Selected best stream: ${sorted[0].quality} (${sorted[0].codec})`);
+
+  return sorted[0].stream_url;
+}
+
 export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   console.log(`\n========== SHOPEE NO WATERMARK SCRAPER ==========`);
   console.log(`[1] Original URL: ${url}`);
@@ -17,12 +50,12 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
 
     const cookies = homeRes.headers['set-cookie'] || [];
     const cookieString = cookies.map(c => c.split(';')[0]).join('; ');
-    
+
     // Extract CSRF token from meta tag
     const html = homeRes.data;
     const tokenMatch = html.match(/<meta\s+name=["']csrf-token["']\s+content=["']([^"']+)["']/i);
     const csrfToken = tokenMatch ? tokenMatch[1] : '';
-    
+
     console.log(`[3] Got cookies: ${cookieString ? 'Yes' : 'No'}`);
     console.log(`[3] Got CSRF token: ${csrfToken ? 'Yes' : 'No'}`);
 
@@ -32,8 +65,8 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
 
     // Step 2: Call their internal API
     console.log(`[4] Sending URL to extraction API...`);
-    
-    const apiRes = await axios.post('https://shopeenowatermark.com/api/extract', 
+
+    const apiRes = await axios.post('https://shopeenowatermark.com/api/extract',
       { url: url },
       {
         headers: {
@@ -49,36 +82,33 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
     );
 
     const data = apiRes.data;
-    console.log(`[5] API Response received!`);
-    
+
     if (!data || !data.success) {
       throw new Error(data?.message || 'API returned failure response');
     }
 
-    // Step 3: Extract the best quality stream
-    let videoUrl = '';
-    
-    if (data.streams_array && data.streams_array.length > 0) {
-      // Prefer H264 for better compatibility if available, otherwise just take the first one
-      const h264Stream = data.streams_array.find((s: any) => s.codec === 'MP4');
-      videoUrl = h264Stream ? h264Stream.stream_url : data.streams_array[0].stream_url;
-    } else if (data.preview) {
+    // Step 3: Pick the HIGHEST quality available stream
+    let videoUrl = getBestStream(data.streams_array);
+
+    // Fallback to preview URL if no streams found
+    if (!videoUrl && data.preview) {
       videoUrl = data.preview;
+      console.log(`[5] No streams found, falling back to preview URL`);
     }
 
     if (!videoUrl) {
       throw new Error('No video streams found in the response');
     }
 
-    console.log(`[6] SUCCESS: Extracted unwatermarked URL!`);
+    console.log(`[6] SUCCESS: Extracted highest quality unwatermarked URL!`);
     console.log(`========== SHOPEE NO WATERMARK SCRAPER END ==========\n`);
 
-    return { 
-      videoUrl, 
-      title: data.title || 'Shopee Video', 
-      cover: data.thumbnail || '', 
-      author: data.username || 'Shopee Creator', 
-      desc: '' 
+    return {
+      videoUrl,
+      title: data.title || 'Shopee Video',
+      cover: data.thumbnail || '',
+      author: data.username || 'Shopee Creator',
+      desc: ''
     };
 
   } catch (error: any) {
