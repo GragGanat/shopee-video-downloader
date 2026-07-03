@@ -18,15 +18,10 @@ async function getBrowser(): Promise<Browser> {
 export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   const browser = await getBrowser();
   
-  // THE TRICK: We pretend to be the Shopee Android App, not a web browser!
+  // Reverted to a standard Mobile Chrome browser so the page actually loads!
   const context = await browser.newContext({
-    userAgent: 'Shopee/2.95.38 (com.shopee.id; build:2.95.38; Android 11; Mobile) app_type/1',
+    userAgent: 'Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
     viewport: { width: 375, height: 812 },
-    extraHTTPHeaders: {
-      'X-Shopee-Client-Timezone': 'Asia/Jakarta',
-      'X-API-VERSION': '1.0.0',
-      'Accept': 'application/json'
-    }
   });
   
   const page = await context.newPage();
@@ -81,6 +76,14 @@ function analyzeCapturedResponses(responses: any[]): VideoResult | null {
     });
 
     allFoundVideos.sort((a, b) => (b.score || 0) - (a.score || 0));
+    
+    // --- DEEP LOGGING ADDED HERE ---
+    console.log("\n========== SHOPEE VIDEO URLS FOUND ==========");
+    allFoundVideos.forEach((v, index) => {
+      console.log(`[${index + 1}] Score: ${v.score} | URL: ${v.url}`);
+    });
+    console.log("=============================================\n");
+
     const bestVideo = allFoundVideos[0];
 
     return {
@@ -108,6 +111,9 @@ async function extractFromDOM(page: Page): Promise<VideoResult | null> {
     });
 
     if (result.videoUrl) {
+      console.log("\n========== FALLBACK DOM URL FOUND ==========");
+      console.log(`URL: ${result.videoUrl}`);
+      console.log("============================================\n");
       return { videoUrl: result.videoUrl, title: result.title, cover: result.cover, author: 'Unknown', desc: '' };
     }
   } catch (e) {}
