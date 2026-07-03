@@ -1,4 +1,4 @@
-import { chromium, Browser } from 'playwright';
+import { chromium, Browser, Page } from 'playwright';
 
 interface VideoResult {
   videoUrl: string;
@@ -45,31 +45,58 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   const page = await context.newPage();
 
   try {
-    let finalUrl = url;
-    if (url.includes('shp.ee') || url.includes('x.shp.ee')) {
-      const response = await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 15000,
-      });
-      finalUrl = response?.url() || url;
-    } else {
-      await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 15000,
-      });
-      finalUrl = page.url();
+    const capturedResponses: any[] = [];
+
+    // CRITICAL FIX: Attach the network listener BEFORE navigating to the page!
+    // This ensures we catch the initial API calls that contain the unwatermarked video data.
+    page.on('response', async (response) => {
+      try {
+        const reqUrl = response.url();
+        // Only intercept API calls to avoid downloading heavy assets
+        if (reqUrl.includes('api/v4') || reqUrl.includes('graphql') || reqUrl.includes('get_video_detail') || reqUrl.includes('video_info')) {
+          const contentType = response.headers()['content-type'] || '';
+          if (contentType.includes('application/json')) {
+            const body = await response.json();
+            capturedResponses.push({ url: reqUrl, body });
+          }
+        }
+      } catch (e) {
+        // Ignore parsing errors for non-JSON responses
+      }
+    });
+
+    // Navigate to the URL
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 15000,
+    });
+
+    // Wait for the page to fully load and API calls to finish
+    await page.waitForTimeout(4000);
+
+    // Scroll down a few times to trigger any lazy-loaded video APIs
+    for (let i = 0; i < 3; i++) {
+      try {
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForTimeout(1000);
+      } catch (e) {}
     }
 
-    await page.waitForTimeout(5000);
+    // 1. Try to extract from the captured API responses
+    let result = analyzeCapturedResponses(capturedResponses);
 
-    let result = await tryExtractFromAPIInterception(page, url);
+    // 2. If API extraction fails, fallback to DOM extraction
     if (!result) {
-      result = await tryExtractFromDOM(page);
+      result = await extractFromDOM(page);
     }
 
     if (!result) {
       throw new Error('Could not extract video data from this Shopee link. The video may be private or unavailable.');
     }
+
+    // 3. Final Watermark Cleaning
+    // Even if we found a URL, we force-clean it to ensure no watermark remains
+    result.videoUrl = cleanWatermarkUrl(result.videoUrl);
 
     return result;
   } finally {
@@ -77,44 +104,54 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   }
 }
 
-async function tryExtractFromAPIInterception(page: any, url: string): Promise<VideoResult | null> {
-  const capturedData: any = {};
+function cleanWatermarkUrl(url: string): string {
+  if (!url) return url;
+  
+  // Shopee's watermarked videos usually end with .default.mp4
+  // The raw, unwatermarked video is at the exact same URL but ending in .mp4
+  if (url.includes('.default.mp4')) {
+    return url.replace('.default.mp4', '.mp4');
+  }
+  
+  return url;
+}
 
-  page.on('response', async (response: any) => {
-    try {
-      const body = await response.text();
-      if (body.includes('video') || body.includes('mp4') || body.includes('m3u8')) {
-        try {
-          const json = JSON.parse(body);
-          capturedData.apiResponse = json;
-          capturedData.apiUrl = response.url();
-        } catch (e) {
-          capturedData.rawBody = body.substring(0, 200);
-          capturedData.apiUrl = response.url();
-        }
-      }
-    } catch (e) {}
-  });
+function analyzeCapturedResponses(responses: any[]): VideoResult | null {
+  const allFoundVideos: VideoDataMatch[] = [];
 
-  await page.waitForTimeout(5000);
-
-  for (let i = 0; i < 5; i++) {
-    try {
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await page.waitForTimeout(1000);
-    } catch (e) {}
+  // Scan every single JSON response we captured
+  for (const res of responses) {
+    extractAllVideos(res.body, 0, allFoundVideos);
   }
 
-  await page.waitForTimeout(3000);
+  if (allFoundVideos.length > 0) {
+    // Filter out watermarked videos
+    const unwatermarkedVideos = allFoundVideos.filter(v => 
+      v.url && !v.url.includes('.default.mp4') && !v.url.includes('watermark')
+    );
 
-  if (capturedData.apiResponse) {
-    return parseShopeeApiResponse(capturedData.apiResponse, capturedData.apiUrl);
+    // Pick the best video (prefer unwatermarked, fallback to whatever we found)
+    const bestVideo = unwatermarkedVideos.length > 0 ? unwatermarkedVideos[0] : allFoundVideos[0];
+
+    // Aggregate metadata (sometimes title is in one object, but the HD video URL is in another)
+    const title = allFoundVideos.find(v => v.title)?.title || 'Shopee Video';
+    const author = allFoundVideos.find(v => v.author)?.author || 'Unknown';
+    const cover = allFoundVideos.find(v => v.cover)?.cover || '';
+    const desc = allFoundVideos.find(v => v.desc)?.desc || '';
+
+    return {
+      videoUrl: bestVideo.url,
+      title,
+      cover,
+      author,
+      desc,
+    };
   }
 
   return null;
 }
 
-async function tryExtractFromDOM(page: any): Promise<VideoResult | null> {
+async function extractFromDOM(page: Page): Promise<VideoResult | null> {
   try {
     try {
       await page.waitForSelector('video, source[src*="mp4"], source[src*="m3u8"]', { timeout: 5000 });
@@ -147,14 +184,8 @@ async function tryExtractFromDOM(page: any): Promise<VideoResult | null> {
     });
 
     if (result.videoUrl) {
-      // If we only have DOM extraction, we try to clean the URL if it has a default watermark suffix
-      let cleanUrl = result.videoUrl;
-      if (cleanUrl.includes('.default.mp4')) {
-        cleanUrl = cleanUrl.replace('.default.mp4', '.mp4');
-      }
-
       return {
-        videoUrl: cleanUrl,
+        videoUrl: result.videoUrl,
         title: result.title || 'Shopee Video',
         cover: result.cover || '',
         author: result.author || 'Unknown',
@@ -166,45 +197,12 @@ async function tryExtractFromDOM(page: any): Promise<VideoResult | null> {
   return null;
 }
 
-function parseShopeeApiResponse(data: any, url: string): VideoResult | null {
-  if (!data || typeof data !== 'object') return null;
-
-  const allFoundVideos: VideoDataMatch[] = [];
-  extractAllVideos(data, 0, allFoundVideos);
-
-  if (allFoundVideos.length > 0) {
-    // 1. Filter out watermarked videos (usually end in .default.mp4)
-    const unwatermarkedVideos = allFoundVideos.filter(v => 
-      v.url && !v.url.includes('.default.mp4') && !v.url.includes('watermark')
-    );
-
-    // 2. Pick the best video (prefer unwatermarked, fallback to whatever we found)
-    const bestVideo = unwatermarkedVideos.length > 0 ? unwatermarkedVideos[0] : allFoundVideos[0];
-
-    // 3. Aggregate metadata (sometimes title is in one object, but the HD video URL is in another)
-    const title = allFoundVideos.find(v => v.title)?.title || 'Shopee Video';
-    const author = allFoundVideos.find(v => v.author)?.author || 'Unknown';
-    const cover = allFoundVideos.find(v => v.cover)?.cover || '';
-    const desc = allFoundVideos.find(v => v.desc)?.desc || '';
-
-    return {
-      videoUrl: bestVideo.url,
-      title,
-      cover,
-      author,
-      desc,
-    };
-  }
-
-  return null;
-}
-
 // Recursive function to find ALL video URLs in the massive Shopee JSON response
 function extractAllVideos(obj: any, depth = 0, results: VideoDataMatch[] = []) {
   if (depth > 15 || !obj || typeof obj !== 'object') return;
 
   // Check if this specific object contains a video URL
-  let url = obj.video_url || obj.videoUrl || obj.play_url || obj.playUrl;
+  let url = obj.video_url || obj.videoUrl || obj.play_url || obj.playUrl || obj.default_format_url;
   
   if (!url && obj.url && typeof obj.url === 'string' && (obj.url.includes('.mp4') || obj.url.includes('.m3u8') || obj.url.includes('/video/'))) {
     url = obj.url;
