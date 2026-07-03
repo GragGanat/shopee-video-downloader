@@ -17,16 +17,23 @@ async function getBrowser(): Promise<Browser> {
 
 export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   const browser = await getBrowser();
+  
+  // THE TRICK: We pretend to be the Shopee Android App, not a web browser!
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    userAgent: 'Shopee/2.95.38 (com.shopee.id; build:2.95.38; Android 11; Mobile) app_type/1',
     viewport: { width: 375, height: 812 },
+    extraHTTPHeaders: {
+      'X-Shopee-Client-Timezone': 'Asia/Jakarta',
+      'X-API-VERSION': '1.0.0',
+      'Accept': 'application/json'
+    }
   });
+  
   const page = await context.newPage();
 
   try {
     const capturedResponses: any[] = [];
     
-    // Listen for API responses BEFORE loading the page
     page.on('response', async (response) => {
       try {
         const reqUrl = response.url();
@@ -52,7 +59,6 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
     if (!result) result = await extractFromDOM(page);
     if (!result) throw new Error('Could not extract video data from this Shopee link.');
 
-    // Final safety check to strip watermark suffix
     result.videoUrl = cleanWatermarkUrl(result.videoUrl);
     return result;
   } finally {
@@ -74,7 +80,6 @@ function analyzeCapturedResponses(responses: any[]): VideoResult | null {
       if (v.url && !v.url.includes('.default.mp4') && !v.url.includes('watermark')) v.score += 50;
     });
 
-    // Sort by highest score first
     allFoundVideos.sort((a, b) => (b.score || 0) - (a.score || 0));
     const bestVideo = allFoundVideos[0];
 
@@ -114,7 +119,6 @@ function extractAllVideos(obj: any, depth = 0, results: VideoDataMatch[] = []) {
 
   let url = obj.video_url || obj.videoUrl || obj.play_url || obj.playUrl || obj.default_format_url;
   
-  // 100 POINTS: Unwatermarked HD videos hidden in the formats array
   if (obj.formats && Array.isArray(obj.formats)) {
     for (const format of obj.formats) {
       if (format.url) {
@@ -136,7 +140,7 @@ function extractAllVideos(obj: any, depth = 0, results: VideoDataMatch[] = []) {
       author: obj.author_name || obj.author?.nickname || obj.creator,
       cover: obj.cover || obj.thumbnail || obj.video_cover,
       desc: obj.description || obj.desc,
-      score: url.includes('.default.mp4') ? 10 : 50 // Penalize watermarked URLs
+      score: url.includes('.default.mp4') ? 10 : 50
     });
   }
 
