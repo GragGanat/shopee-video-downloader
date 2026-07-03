@@ -21,7 +21,7 @@ async function getBrowser(): Promise<Browser> {
 }
 
 export async function extractShopeeVideo(url: string): Promise<VideoResult> {
-  console.log(`\n========== PLAYWRIGHT SVXTRACT SCRAPER ==========`);
+  console.log(`\n========== SHOPEE DIRECT BROWSER API ==========`);
   console.log(`[1] Original URL: ${url}`);
 
   const browser = await getBrowser();
@@ -31,10 +31,10 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   
   const page = await context.newPage();
 
-  // Block heavy media to save RAM, but allow scripts/CSS so SVXtract works properly
+  // Block heavy media and images to save RAM, making it lightning fast
   await page.route('**/*', (route) => {
     const type = route.request().resourceType();
-    if (['font', 'media'].includes(type)) {
+    if (['font', 'media', 'image'].includes(type)) {
       route.abort();
     } else {
       route.continue();
@@ -42,83 +42,116 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   });
 
   try {
-    // STEP 1: Resolve the Shopee shortlink
-    console.log(`[2] Resolving Shopee shortlink...`);
+    console.log(`[2] Resolving Shopee link...`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    await page.waitForTimeout(2000); // Give it a moment to redirect
+    await page.waitForTimeout(3000); // Wait for shp.ee to redirect
     
     const resolvedUrl = page.url();
     console.log(`[3] Resolved URL: ${resolvedUrl}`);
 
-    // STEP 2: Go to SVXtract
-    console.log(`[4] Navigating to SVXtract...`);
-    // INCREASED TIMEOUT TO 60 SECONDS
-    await page.goto('https://svxtract.com/', { waitUntil: 'domcontentloaded', timeout: 60000 } );
+    const urlObj = new URL(resolvedUrl);
+    const domain = urlObj.hostname;
 
-    console.log(`[5] Typing URL into the input box...`);
-    await page.fill('input[type="text"], input[type="url"], input[name="url"]', resolvedUrl);
-
-    console.log(`[6] Clicking Download and intercepting API...`);
-    
-    // Start listening for their backend API response
-    const responsePromise = page.waitForResponse(
-      response => response.url().includes('apiv3.php') || response.url().includes('api'),
-      { timeout: 60000 }
-    ).catch(() => null);
-
-    // Click the download button
-    await page.click('button[type="submit"], button:has-text("Download"), button:has-text("Extract")');
-
-    // Wait for their API to respond
-    const apiResponse = await responsePromise;
-    
-    let videoUrl = '';
+    let bestUrl = '';
     let title = 'Shopee Video';
     let cover = '';
-    let author = 'Shopee Creator';
+    let desc = '';
 
-    if (apiResponse) {
-      console.log(`[7] Intercepted SVXtract API Response!`);
-      const data = await apiResponse.json().catch(() => null);
-      
-      console.log(`[7] API Data:`, data ? JSON.stringify(data).substring(0, 300) : 'null');
-      
-      if (data) {
-        videoUrl = data.video_url || data.url || data.download_url || data.src || data.hd_video;
-        title = data.title || title;
-        cover = data.thumbnail || data.cover || data.image || cover;
-        author = data.author || data.username || author;
+    // Extract IDs using FIXED regex (matches alphanumeric base64 IDs like AsWxY3sOCAARIY9RAAAAAA==)
+    let shopId = null, itemId = null, videoId = null;
+
+    const p1 = resolvedUrl.match(/-i\.(\d+)\.(\d+)/);
+    const p2 = resolvedUrl.match(/shop\/(\d+)\/item\/(\d+)/);
+    if (p1) { shopId = p1[1]; itemId = p1[2]; }
+    else if (p2) { shopId = p2[1]; itemId = p2[2]; }
+
+    const v1 = resolvedUrl.match(/video_id=([^&]+)/);
+    const v2 = resolvedUrl.match(/answers\/([^/?]+)/);
+    const v3 = resolvedUrl.match(/share-video\/([^/?]+)/);
+    const v4 = resolvedUrl.match(/\/v\/([^/?]+)/);
+
+    if (v1) videoId = v1[1];
+    else if (v2) videoId = v2[1];
+    else if (v3) videoId = v3[1];
+    else if (v4) videoId = v4[1];
+
+    console.log(`[4] Extracted IDs -> Shop: ${shopId}, Item: ${itemId}, Video: ${videoId}`);
+
+    if (videoId) {
+      console.log(`[5] Pinging Video API internally...`);
+      // Run fetch INSIDE the browser to bypass CORS and Cloudflare
+      const apiData = await page.evaluate(async ({ domain, videoId }) => {
+        try {
+          const res = await fetch(`https://${domain}/api/v4/video/get_video_detail?video_id=${videoId}` );
+          return await res.json();
+        } catch (e) { return null; }
+      }, { domain, videoId });
+
+      if (apiData?.data) {
+        title = apiData.data.title || title;
+        desc = apiData.data.description || desc;
+        cover = apiData.data.cover || cover;
+        
+        if (apiData.data.formats && apiData.data.formats.length > 0) {
+          const clean = apiData.data.formats.find((f: any) => f.url && !f.url.includes('.default.mp4'));
+          bestUrl = clean ? clean.url : apiData.data.formats[0].url;
+          console.log(`[6] SUCCESS: Found unwatermarked video in formats array!`);
+        } else if (apiData.data.video_url) {
+          bestUrl = apiData.data.video_url;
+        }
+      }
+    } else if (shopId && itemId) {
+      console.log(`[5] Pinging Product API internally...`);
+      const apiData = await page.evaluate(async ({ domain, shopId, itemId }) => {
+        try {
+          const res = await fetch(`https://${domain}/api/v4/item/get?itemid=${itemId}&shopid=${shopId}` );
+          return await res.json();
+        } catch (e) { return null; }
+      }, { domain, shopId, itemId });
+
+      if (apiData?.data) {
+        title = apiData.data.name || title;
+        desc = apiData.data.description || desc;
+        cover = apiData.data.image ? `https://cf.shopee.com/file/${apiData.data.image}` : cover;
+        
+        const vInfo = apiData.data.video_info_list?.[0];
+        if (vInfo ) {
+          if (vInfo.formats && vInfo.formats.length > 0) {
+            const clean = vInfo.formats.find((f: any) => f.url && !f.url.includes('.default.mp4'));
+            bestUrl = clean ? clean.url : vInfo.formats[0].url;
+            console.log(`[6] SUCCESS: Found unwatermarked video in formats array!`);
+          } else if (vInfo.video_url) {
+            bestUrl = vInfo.video_url;
+          }
+        }
       }
     }
 
-    // Fallback: If API interception fails, wait for the DOM to show the download button
-    if (!videoUrl) {
-      console.log(`[8] API interception failed or empty. Waiting for DOM to update...`);
-      await page.waitForSelector('a[href*=".mp4"], video source[src*=".mp4"]', { timeout: 60000 });
-      
-      videoUrl = await page.evaluate(() => {
-        const a = document.querySelector('a[href*=".mp4"]');
-        if (a) return (a as HTMLAnchorElement).href;
-        const v = document.querySelector('video source[src*=".mp4"]');
-        if (v) return (v as HTMLSourceElement).src;
-        return '';
+    // Fallback to DOM if API fails
+    if (!bestUrl) {
+      console.log(`[5] API failed. Falling back to DOM extraction...`);
+      bestUrl = await page.evaluate(() => {
+        const v = document.querySelector('video source[src*=".mp4"], video');
+        return v ? (v as any).src || v.getAttribute('data-src') : '';
       }) || '';
     }
 
-    if (!videoUrl) {
-      throw new Error('Failed to extract video from SVXtract.');
+    if (!bestUrl) {
+      throw new Error('Could not extract video data from this Shopee link.');
     }
 
-    console.log(`[9] SUCCESS: Extracted unwatermarked URL!`);
-    console.log(`========== PLAYWRIGHT SCRAPER END ==========\n`);
+    // Final safety scrub
+    bestUrl = bestUrl.replace('.default.mp4', '.mp4');
+    console.log(`[7] FINAL URL: ${bestUrl}`);
+    console.log(`========== SHOPEE DIRECT BROWSER API END ==========\n`);
 
-    return { videoUrl, title, cover, author, desc: '' };
+    return { videoUrl: bestUrl, title, cover, author: 'Shopee', desc };
 
   } catch (error: any) {
-    console.error('\n========== PLAYWRIGHT SCRAPER ERROR ==========');
+    console.error('\n========== SCRAPER ERROR ==========');
     console.error(error.message);
-    console.error('==============================================\n');
-    throw new Error('Failed to extract video. The service might be down or the URL is invalid.');
+    console.error('===================================\n');
+    throw new Error('Failed to extract video. The link might be invalid or private.');
   } finally {
     await context.close();
   }
