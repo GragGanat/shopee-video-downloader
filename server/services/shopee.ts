@@ -1,158 +1,94 @@
-import { chromium, Browser } from 'playwright';
+import axios from 'axios';
 
 interface VideoResult { videoUrl: string; title: string; cover: string; author: string; desc: string; }
 
-let globalBrowser: Browser | null = null;
-
-async function getBrowser(): Promise<Browser> {
-  if (!globalBrowser) {
-    globalBrowser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox', 
-        '--disable-setuid-sandbox', 
-        '--disable-dev-shm-usage', 
-        '--disable-gpu',
-        '--single-process'
-      ],
-    });
-  }
-  return globalBrowser;
-}
-
 export async function extractShopeeVideo(url: string): Promise<VideoResult> {
-  console.log(`\n========== SHOPEE DIRECT BROWSER API ==========`);
+  console.log(`\n========== SHOPEE NO WATERMARK SCRAPER ==========`);
   console.log(`[1] Original URL: ${url}`);
 
-  const browser = await getBrowser();
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  });
-  
-  const page = await context.newPage();
-
-  // Block heavy media and images to save RAM, making it lightning fast
-  await page.route('**/*', (route) => {
-    const type = route.request().resourceType();
-    if (['font', 'media', 'image'].includes(type)) {
-      route.abort();
-    } else {
-      route.continue();
-    }
-  });
-
   try {
-    console.log(`[2] Resolving Shopee link...`);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    await page.waitForTimeout(3000); // Wait for shp.ee to redirect
+    // Step 1: Get CSRF token and session cookies from shopeenowatermark.com
+    console.log(`[2] Fetching session cookies and CSRF token...`);
+    const homeRes = await axios.get('https://shopeenowatermark.com/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
+
+    const cookies = homeRes.headers['set-cookie'] || [];
+    const cookieString = cookies.map(c => c.split(';')[0]).join('; ');
     
-    const resolvedUrl = page.url();
-    console.log(`[3] Resolved URL: ${resolvedUrl}`);
+    // Extract CSRF token from meta tag
+    const html = homeRes.data;
+    const tokenMatch = html.match(/<meta\s+name=["']csrf-token["']\s+content=["']([^"']+)["']/i);
+    const csrfToken = tokenMatch ? tokenMatch[1] : '';
+    
+    console.log(`[3] Got cookies: ${cookieString ? 'Yes' : 'No'}`);
+    console.log(`[3] Got CSRF token: ${csrfToken ? 'Yes' : 'No'}`);
 
-    const urlObj = new URL(resolvedUrl);
-    const domain = urlObj.hostname;
+    if (!csrfToken) {
+      throw new Error('Failed to extract CSRF token from shopeenowatermark.com');
+    }
 
-    let bestUrl = '';
-    let title = 'Shopee Video';
-    let cover = '';
-    let desc = '';
-
-    // Extract IDs using FIXED regex (matches alphanumeric base64 IDs like AsWxY3sOCAARIY9RAAAAAA==)
-    let shopId = null, itemId = null, videoId = null;
-
-    const p1 = resolvedUrl.match(/-i\.(\d+)\.(\d+)/);
-    const p2 = resolvedUrl.match(/shop\/(\d+)\/item\/(\d+)/);
-    if (p1) { shopId = p1[1]; itemId = p1[2]; }
-    else if (p2) { shopId = p2[1]; itemId = p2[2]; }
-
-    const v1 = resolvedUrl.match(/video_id=([^&]+)/);
-    const v2 = resolvedUrl.match(/answers\/([^/?]+)/);
-    const v3 = resolvedUrl.match(/share-video\/([^/?]+)/);
-    const v4 = resolvedUrl.match(/\/v\/([^/?]+)/);
-
-    if (v1) videoId = v1[1];
-    else if (v2) videoId = v2[1];
-    else if (v3) videoId = v3[1];
-    else if (v4) videoId = v4[1];
-
-    console.log(`[4] Extracted IDs -> Shop: ${shopId}, Item: ${itemId}, Video: ${videoId}`);
-
-    if (videoId) {
-      console.log(`[5] Pinging Video API internally...`);
-      // Run fetch INSIDE the browser to bypass CORS and Cloudflare
-      const apiData = await page.evaluate(async ({ domain, videoId }) => {
-        try {
-          const res = await fetch(`https://${domain}/api/v4/video/get_video_detail?video_id=${videoId}` );
-          return await res.json();
-        } catch (e) { return null; }
-      }, { domain, videoId });
-
-      if (apiData?.data) {
-        title = apiData.data.title || title;
-        desc = apiData.data.description || desc;
-        cover = apiData.data.cover || cover;
-        
-        if (apiData.data.formats && apiData.data.formats.length > 0) {
-          const clean = apiData.data.formats.find((f: any) => f.url && !f.url.includes('.default.mp4'));
-          bestUrl = clean ? clean.url : apiData.data.formats[0].url;
-          console.log(`[6] SUCCESS: Found unwatermarked video in formats array!`);
-        } else if (apiData.data.video_url) {
-          bestUrl = apiData.data.video_url;
+    // Step 2: Call their internal API
+    console.log(`[4] Sending URL to extraction API...`);
+    
+    const apiRes = await axios.post('https://shopeenowatermark.com/api/extract', 
+      { url: url },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Origin': 'https://shopeenowatermark.com',
+          'Referer': 'https://shopeenowatermark.com/',
+          'Cookie': cookieString,
+          'X-CSRF-TOKEN': csrfToken,
+          'X-Requested-With': 'XMLHttpRequest'
         }
       }
-    } else if (shopId && itemId) {
-      console.log(`[5] Pinging Product API internally...`);
-      const apiData = await page.evaluate(async ({ domain, shopId, itemId }) => {
-        try {
-          const res = await fetch(`https://${domain}/api/v4/item/get?itemid=${itemId}&shopid=${shopId}` );
-          return await res.json();
-        } catch (e) { return null; }
-      }, { domain, shopId, itemId });
+    );
 
-      if (apiData?.data) {
-        title = apiData.data.name || title;
-        desc = apiData.data.description || desc;
-        cover = apiData.data.image ? `https://cf.shopee.com/file/${apiData.data.image}` : cover;
-        
-        const vInfo = apiData.data.video_info_list?.[0];
-        if (vInfo ) {
-          if (vInfo.formats && vInfo.formats.length > 0) {
-            const clean = vInfo.formats.find((f: any) => f.url && !f.url.includes('.default.mp4'));
-            bestUrl = clean ? clean.url : vInfo.formats[0].url;
-            console.log(`[6] SUCCESS: Found unwatermarked video in formats array!`);
-          } else if (vInfo.video_url) {
-            bestUrl = vInfo.video_url;
-          }
-        }
-      }
+    const data = apiRes.data;
+    console.log(`[5] API Response received!`);
+    
+    if (!data || !data.success) {
+      throw new Error(data?.message || 'API returned failure response');
     }
 
-    // Fallback to DOM if API fails
-    if (!bestUrl) {
-      console.log(`[5] API failed. Falling back to DOM extraction...`);
-      bestUrl = await page.evaluate(() => {
-        const v = document.querySelector('video source[src*=".mp4"], video');
-        return v ? (v as any).src || v.getAttribute('data-src') : '';
-      }) || '';
+    // Step 3: Extract the best quality stream
+    let videoUrl = '';
+    
+    if (data.streams_array && data.streams_array.length > 0) {
+      // Prefer H264 for better compatibility if available, otherwise just take the first one
+      const h264Stream = data.streams_array.find((s: any) => s.codec === 'MP4');
+      videoUrl = h264Stream ? h264Stream.stream_url : data.streams_array[0].stream_url;
+    } else if (data.preview) {
+      videoUrl = data.preview;
     }
 
-    if (!bestUrl) {
-      throw new Error('Could not extract video data from this Shopee link.');
+    if (!videoUrl) {
+      throw new Error('No video streams found in the response');
     }
 
-    // Final safety scrub
-    bestUrl = bestUrl.replace('.default.mp4', '.mp4');
-    console.log(`[7] FINAL URL: ${bestUrl}`);
-    console.log(`========== SHOPEE DIRECT BROWSER API END ==========\n`);
+    console.log(`[6] SUCCESS: Extracted unwatermarked URL!`);
+    console.log(`========== SHOPEE NO WATERMARK SCRAPER END ==========\n`);
 
-    return { videoUrl: bestUrl, title, cover, author: 'Shopee', desc };
+    return { 
+      videoUrl, 
+      title: data.title || 'Shopee Video', 
+      cover: data.thumbnail || '', 
+      author: data.username || 'Shopee Creator', 
+      desc: '' 
+    };
 
   } catch (error: any) {
     console.error('\n========== SCRAPER ERROR ==========');
     console.error(error.message);
+    if (error.response) {
+      console.error(`Status: ${error.response.status}`);
+      console.error(`Data:`, typeof error.response.data === 'string' ? error.response.data.substring(0, 200) : error.response.data);
+    }
     console.error('===================================\n');
-    throw new Error('Failed to extract video. The link might be invalid or private.');
-  } finally {
-    await context.close();
+    throw new Error('Failed to extract video. The service might be down or the URL is invalid.');
   }
 }
