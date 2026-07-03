@@ -13,7 +13,7 @@ async function getBrowser(): Promise<Browser> {
         '--disable-setuid-sandbox', 
         '--disable-dev-shm-usage', 
         '--disable-gpu',
-        '--single-process' // Extra memory saving flag
+        '--single-process'
       ],
     });
   }
@@ -22,7 +22,7 @@ async function getBrowser(): Promise<Browser> {
 
 export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   console.log(`\n========== PLAYWRIGHT SVXTRACT SCRAPER ==========`);
-  console.log(`[1] Target URL: ${url}`);
+  console.log(`[1] Original URL: ${url}`);
 
   const browser = await getBrowser();
   const context = await browser.newContext({
@@ -31,10 +31,10 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   
   const page = await context.newPage();
 
-  // MEMORY SAVER: Block all images, CSS, and fonts from loading!
+  // Block heavy media to save RAM, but allow scripts/CSS so SVXtract works properly
   await page.route('**/*', (route) => {
     const type = route.request().resourceType();
-    if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+    if (['font', 'media'].includes(type)) {
       route.abort();
     } else {
       route.continue();
@@ -42,19 +42,27 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   });
 
   try {
-    console.log(`[2] Navigating to SVXtract...`);
+    // STEP 1: Resolve the Shopee shortlink
+    console.log(`[2] Resolving Shopee shortlink...`);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(2000); // Give it a moment to redirect
+    
+    const resolvedUrl = page.url();
+    console.log(`[3] Resolved URL: ${resolvedUrl}`);
+
+    // STEP 2: Go to SVXtract
+    console.log(`[4] Navigating to SVXtract...`);
     await page.goto('https://svxtract.com/', { waitUntil: 'domcontentloaded', timeout: 15000 } );
 
-    console.log(`[3] Typing URL into the input box...`);
-    // Find the input box and type the URL
-    await page.fill('input[type="text"], input[type="url"], input[name="url"]', url);
+    console.log(`[5] Typing URL into the input box...`);
+    await page.fill('input[type="text"], input[type="url"], input[name="url"]', resolvedUrl);
 
-    console.log(`[4] Clicking Download and intercepting API...`);
+    console.log(`[6] Clicking Download and intercepting API...`);
     
-    // Start listening for their backend API response BEFORE we click the button
+    // Start listening for their backend API response
     const responsePromise = page.waitForResponse(
       response => response.url().includes('apiv3.php') || response.url().includes('api'),
-      { timeout: 15000 }
+      { timeout: 20000 }
     ).catch(() => null);
 
     // Click the download button
@@ -69,8 +77,12 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
     let author = 'Shopee Creator';
 
     if (apiResponse) {
-      console.log(`[5] Intercepted SVXtract API Response!`);
+      console.log(`[7] Intercepted SVXtract API Response!`);
       const data = await apiResponse.json().catch(() => null);
+      
+      // LOG THE EXACT RESPONSE SO WE CAN DEBUG IT!
+      console.log(`[7] API Data:`, data ? JSON.stringify(data).substring(0, 300) : 'null');
+      
       if (data) {
         videoUrl = data.video_url || data.url || data.download_url || data.src || data.hd_video;
         title = data.title || title;
@@ -81,7 +93,7 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
 
     // Fallback: If API interception fails, wait for the DOM to show the download button
     if (!videoUrl) {
-      console.log(`[5] API interception failed. Waiting for DOM to update...`);
+      console.log(`[8] API interception failed or empty. Waiting for DOM to update...`);
       await page.waitForSelector('a[href*=".mp4"], video source[src*=".mp4"]', { timeout: 15000 });
       
       videoUrl = await page.evaluate(() => {
@@ -97,7 +109,7 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
       throw new Error('Failed to extract video from SVXtract.');
     }
 
-    console.log(`[6] SUCCESS: Extracted unwatermarked URL!`);
+    console.log(`[9] SUCCESS: Extracted unwatermarked URL!`);
     console.log(`========== PLAYWRIGHT SCRAPER END ==========\n`);
 
     return { videoUrl, title, cover, author, desc: '' };
@@ -108,7 +120,6 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
     console.error('==============================================\n');
     throw new Error('Failed to extract video. The service might be down or the URL is invalid.');
   } finally {
-    // ALWAYS close the tab to free up memory for the next user
     await context.close();
   }
 }
