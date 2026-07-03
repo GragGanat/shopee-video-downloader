@@ -37,7 +37,6 @@ async function getBrowser(): Promise<Browser> {
 export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   const browser = await getBrowser();
   
-  // Open a new isolated context (like an incognito window) for this specific request
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     viewport: { width: 375, height: 812 },
@@ -74,7 +73,6 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
 
     return result;
   } finally {
-    // ONLY close the context (tab), keep the main browser running for the next user!
     await context.close();
   }
 }
@@ -149,8 +147,14 @@ async function tryExtractFromDOM(page: any): Promise<VideoResult | null> {
     });
 
     if (result.videoUrl) {
+      // If we only have DOM extraction, we try to clean the URL if it has a default watermark suffix
+      let cleanUrl = result.videoUrl;
+      if (cleanUrl.includes('.default.mp4')) {
+        cleanUrl = cleanUrl.replace('.default.mp4', '.mp4');
+      }
+
       return {
-        videoUrl: result.videoUrl,
+        videoUrl: cleanUrl,
         title: result.title || 'Shopee Video',
         cover: result.cover || '',
         author: result.author || 'Unknown',
@@ -165,64 +169,65 @@ async function tryExtractFromDOM(page: any): Promise<VideoResult | null> {
 function parseShopeeApiResponse(data: any, url: string): VideoResult | null {
   if (!data || typeof data !== 'object') return null;
 
-  const foundVideo = findVideoInObject(data);
-  if (foundVideo) {
+  const allFoundVideos: VideoDataMatch[] = [];
+  extractAllVideos(data, 0, allFoundVideos);
+
+  if (allFoundVideos.length > 0) {
+    // 1. Filter out watermarked videos (usually end in .default.mp4)
+    const unwatermarkedVideos = allFoundVideos.filter(v => 
+      v.url && !v.url.includes('.default.mp4') && !v.url.includes('watermark')
+    );
+
+    // 2. Pick the best video (prefer unwatermarked, fallback to whatever we found)
+    const bestVideo = unwatermarkedVideos.length > 0 ? unwatermarkedVideos[0] : allFoundVideos[0];
+
+    // 3. Aggregate metadata (sometimes title is in one object, but the HD video URL is in another)
+    const title = allFoundVideos.find(v => v.title)?.title || 'Shopee Video';
+    const author = allFoundVideos.find(v => v.author)?.author || 'Unknown';
+    const cover = allFoundVideos.find(v => v.cover)?.cover || '';
+    const desc = allFoundVideos.find(v => v.desc)?.desc || '';
+
     return {
-      videoUrl: foundVideo.url,
-      title: foundVideo.title || 'Shopee Video',
-      cover: foundVideo.cover || '',
-      author: foundVideo.author || 'Unknown',
-      desc: foundVideo.desc || '',
+      videoUrl: bestVideo.url,
+      title,
+      cover,
+      author,
+      desc,
     };
   }
 
   return null;
 }
 
-function findVideoInObject(obj: any, depth = 0): VideoDataMatch | null {
-  if (depth > 10 || !obj || typeof obj !== 'object') return null;
+// Recursive function to find ALL video URLs in the massive Shopee JSON response
+function extractAllVideos(obj: any, depth = 0, results: VideoDataMatch[] = []) {
+  if (depth > 15 || !obj || typeof obj !== 'object') return;
 
-  if (obj.video_url || obj.videoUrl) {
-    return {
-      url: obj.video_url || obj.videoUrl,
-      title: obj.title || obj.video_title,
-      author: obj.author_name || obj.author?.nickname || obj.user?.nickname,
+  // Check if this specific object contains a video URL
+  let url = obj.video_url || obj.videoUrl || obj.play_url || obj.playUrl;
+  
+  if (!url && obj.url && typeof obj.url === 'string' && (obj.url.includes('.mp4') || obj.url.includes('.m3u8') || obj.url.includes('/video/'))) {
+    url = obj.url;
+  }
+
+  if (url) {
+    results.push({
+      url,
+      title: obj.title || obj.video_title || obj.name || obj.desc,
+      author: obj.author_name || obj.author?.nickname || obj.user?.nickname || obj.creator,
       cover: obj.cover || obj.thumbnail || obj.thumb || obj.video_cover,
       desc: obj.description || obj.desc || obj.video_desc,
-    };
+    });
   }
 
-  if (obj.url && typeof obj.url === 'string' && (obj.url.includes('.mp4') || obj.url.includes('.m3u8') || obj.url.includes('/video/'))) {
-    return {
-      url: obj.url,
-      title: obj.title || obj.name || obj.desc,
-      author: obj.author || obj.creator || obj.user?.nickname,
-      cover: obj.cover || obj.thumbnail || obj.thumb,
-      desc: obj.desc || obj.description,
-    };
-  }
-
-  if (obj.play_url || obj.playUrl) {
-    return {
-      url: obj.play_url || obj.playUrl,
-      title: obj.title || obj.name,
-      author: obj.author || obj.creator,
-      cover: obj.cover || obj.thumbnail,
-      desc: obj.desc,
-    };
-  }
-
+  // Continue searching deeper into the JSON
   if (Array.isArray(obj)) {
-    for (const item of obj.slice(0, 50)) {
-      const found: VideoDataMatch | null = findVideoInObject(item, depth + 1);
-      if (found) return found;
+    for (const item of obj.slice(0, 100)) {
+      extractAllVideos(item, depth + 1, results);
     }
   } else {
-    for (const key of Object.keys(obj).slice(0, 50)) {
-      const found: VideoDataMatch | null = findVideoInObject(obj[key], depth + 1);
-      if (found) return found;
+    for (const key of Object.keys(obj).slice(0, 100)) {
+      extractAllVideos(obj[key], depth + 1, results);
     }
   }
-
-  return null;
 }
