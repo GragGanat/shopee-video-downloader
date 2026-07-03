@@ -1,87 +1,114 @@
-import axios from 'axios';
+import { chromium, Browser } from 'playwright';
 
 interface VideoResult { videoUrl: string; title: string; cover: string; author: string; desc: string; }
 
-export async function extractShopeeVideo(url: string): Promise<VideoResult> {
-  console.log(`\n========== SHOPEE DIRECT API SCRAPER ==========`);
-  console.log(`[1] Original URL: ${url}`);
+let globalBrowser: Browser | null = null;
 
-  let finalUrl = url;
-  let html = '';
+async function getBrowser(): Promise<Browser> {
+  if (!globalBrowser) {
+    globalBrowser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox', 
+        '--disable-dev-shm-usage', 
+        '--disable-gpu',
+        '--single-process' // Extra memory saving flag
+      ],
+    });
+  }
+  return globalBrowser;
+}
+
+export async function extractShopeeVideo(url: string): Promise<VideoResult> {
+  console.log(`\n========== PLAYWRIGHT SVXTRACT SCRAPER ==========`);
+  console.log(`[1] Target URL: ${url}`);
+
+  const browser = await getBrowser();
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  });
+  
+  const page = await context.newPage();
+
+  // MEMORY SAVER: Block all images, CSS, and fonts from loading!
+  await page.route('**/*', (route) => {
+    const type = route.request().resourceType();
+    if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+      route.abort();
+    } else {
+      route.continue();
+    }
+  });
 
   try {
-    // 1. Follow HTTP Redirects (Crucial for shp.ee links)
-    const res = await axios.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-    });
-    finalUrl = res.request?.res?.responseUrl || finalUrl;
-    html = typeof res.data === 'string' ? res.data : '';
-    console.log(`[2] Redirected URL: ${finalUrl}`);
-  } catch (e: any) {
-    finalUrl = e.response?.request?.res?.responseUrl || finalUrl;
-    html = typeof e.response?.data === 'string' ? e.response.data : '';
-    console.log(`[2] Redirected URL (via catch): ${finalUrl}`);
-  }
+    console.log(`[2] Navigating to SVXtract...`);
+    await page.goto('https://svxtract.com/', { waitUntil: 'domcontentloaded', timeout: 15000 } );
 
-  // 2. Follow JS/Meta Redirects (Shopee often hides the real URL inside the HTML)
-  const metaMatch = html.match(/URL='?([^'"]+)'?/i) || html.match(/window\.location\.href\s*=\s*["']([^"']+)["']/i);
-  if (metaMatch && metaMatch[1]) {
-    finalUrl = metaMatch[1];
-    console.log(`[3] Followed JS/Meta Redirect to: ${finalUrl}`);
-  }
+    console.log(`[3] Typing URL into the input box...`);
+    // Find the input box and type the URL
+    await page.fill('input[type="text"], input[type="url"], input[name="url"]', url);
 
-  // 3. Extract IDs using comprehensive Regex patterns
-  let shopId = null, itemId = null, videoId = null;
+    console.log(`[4] Clicking Download and intercepting API...`);
+    
+    // Start listening for their backend API response BEFORE we click the button
+    const responsePromise = page.waitForResponse(
+      response => response.url().includes('apiv3.php') || response.url().includes('api'),
+      { timeout: 15000 }
+    ).catch(() => null);
 
-  const p1 = finalUrl.match(/-i\.(\d+)\.(\d+)/);
-  const p2 = finalUrl.match(/shop\/(\d+)\/item\/(\d+)/);
-  const p3 = finalUrl.match(/product\/(\d+)\/(\d+)/);
-  const p4 = finalUrl.match(/itemid=(\d+)&shopid=(\d+)/);
-  const p5 = finalUrl.match(/shopid=(\d+)&itemid=(\d+)/);
+    // Click the download button
+    await page.click('button[type="submit"], button:has-text("Download"), button:has-text("Extract")');
 
-  if (p1) { shopId = p1[1]; itemId = p1[2]; }
-  else if (p2) { shopId = p2[1]; itemId = p2[2]; }
-  else if (p3) { shopId = p3[1]; itemId = p3[2]; }
-  else if (p4) { itemId = p4[1]; shopId = p4[2]; }
-  else if (p5) { shopId = p5[1]; itemId = p5[2]; }
+    // Wait for their API to respond
+    const apiResponse = await responsePromise;
+    
+    let videoUrl = '';
+    let title = 'Shopee Video';
+    let cover = '';
+    let author = 'Shopee Creator';
 
-  const v1 = finalUrl.match(/video_id=([^&]+)/);
-  const v2 = finalUrl.match(/answers\/(\d+)/);
-  const v3 = finalUrl.match(/share-video\/(\d+)/);
-  const v4 = finalUrl.match(/\/v\/(\d+)/);
-
-  if (v1) videoId = v1[1];
-  else if (v2) videoId = v2[1];
-  else if (v3) videoId = v3[1];
-  else if (v4) videoId = v4[1];
-
-  console.log(`[4] Extracted IDs -> Shop: ${shopId}, Item: ${itemId}, Video: ${videoId}`);
-
-  const domainMatch = finalUrl.match(/https?:\/\/([^/]+ )/);
-  const domain = domainMatch ? domainMatch[1] : 'shopee.co.id';
-
-  let bestUrl = '';
-  let title = 'Shopee Video';
-  let cover = '';
-  let desc = '';
-
-  // 4. Fetch Product API
-  if (shopId && itemId) {
-    const apiUrl = `https://${domain}/api/v4/item/get?itemid=${itemId}&shopid=${shopId}`;
-    console.log(`[5] Pinging Product API: ${apiUrl}` );
-    try {
-      const apiRes = await axios.get(apiUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
-      const data = apiRes.data?.data;
+    if (apiResponse) {
+      console.log(`[5] Intercepted SVXtract API Response!`);
+      const data = await apiResponse.json().catch(() => null);
       if (data) {
-        title = data.name || title;
-        desc = data.description || desc;
-        cover = data.image ? `https://cf.shopee.com/file/${data.image}` : cover;
-        const vInfo = data.video_info_list?.[0];
-        if (vInfo?.formats?.length > 0 ) {
-          const clean = vInfo.formats.find((f: any) => f.url && !f.url.includes('.default.mp4'));
-          bestUrl = clean ? clean.url : vInfo.formats[0].url;
-        } else if (vInfo?.video_url) {
-          bestUrl = vInfo.video_url;
-        }
+        videoUrl = data.video_url || data.url || data.download_url || data.src || data.hd_video;
+        title = data.title || title;
+        cover = data.thumbnail || data.cover || data.image || cover;
+        author = data.author || data.username || author;
       }
-    } catch (e: any) { console.log(`[!] Product API Error: ${e.message}`);
+    }
+
+    // Fallback: If API interception fails, wait for the DOM to show the download button
+    if (!videoUrl) {
+      console.log(`[5] API interception failed. Waiting for DOM to update...`);
+      await page.waitForSelector('a[href*=".mp4"], video source[src*=".mp4"]', { timeout: 15000 });
+      
+      videoUrl = await page.evaluate(() => {
+        const a = document.querySelector('a[href*=".mp4"]');
+        if (a) return (a as HTMLAnchorElement).href;
+        const v = document.querySelector('video source[src*=".mp4"]');
+        if (v) return (v as HTMLSourceElement).src;
+        return '';
+      }) || '';
+    }
+
+    if (!videoUrl) {
+      throw new Error('Failed to extract video from SVXtract.');
+    }
+
+    console.log(`[6] SUCCESS: Extracted unwatermarked URL!`);
+    console.log(`========== PLAYWRIGHT SCRAPER END ==========\n`);
+
+    return { videoUrl, title, cover, author, desc: '' };
+
+  } catch (error: any) {
+    console.error('\n========== PLAYWRIGHT SCRAPER ERROR ==========');
+    console.error(error.message);
+    console.error('==============================================\n');
+    throw new Error('Failed to extract video. The service might be down or the URL is invalid.');
+  } finally {
+    // ALWAYS close the tab to free up memory for the next user
+    await context.close();
+  }
+}
