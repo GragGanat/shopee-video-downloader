@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios from 'axios'; // Kept in case you use it elsewhere in your app
 
 interface VideoResult { videoUrl: string; title: string; cover: string; author: string; desc: string; }
 
@@ -7,35 +7,60 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   console.log(`[1] Target URL: ${url}`);
 
   try {
-    console.log(`[2] Fetching session cookies from svxtract.com...`);
-    const homeRes = await axios.get('https://svxtract.com/', {
+    console.log(`[2] Fetching session cookies and tokens from svxtract.com...`);
+    
+    // Use native fetch to get the homepage
+    const homeRes = await fetch('https://svxtract.com/', {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64 ) AppleWebKit/537.36'
       }
     });
 
-    const cookies = homeRes.headers['set-cookie'] || [];
+    // Extract Cookies
+    const cookies = homeRes.headers.getSetCookie ? homeRes.headers.getSetCookie() : [];
     const cookieString = cookies.map(c => c.split(';')[0]).join('; ');
     console.log(`[3] Got cookies: ${cookieString ? 'Yes' : 'No'}`);
 
+    // Extract CSRF Tokens from the HTML form
+    const homeHtml = await homeRes.text();
+    const tokenMatch = homeHtml.match(/name=["']_?token["']\s+value=["']([^"']+)["']/i) || 
+                       homeHtml.match(/value=["']([^"']+)["']\s+name=["']_?token["']/i) ||
+                       homeHtml.match(/name=["']csrf_token["']\s+value=["']([^"']+)["']/i);
+    const token = tokenMatch ? tokenMatch[1] : '';
+    if (token) console.log(`[3b] Found CSRF Token: ${token.substring(0, 5)}...`);
+
     console.log(`[4] Sending URL to SVXtract API...`);
     
-    // Using URLSearchParams directly forces Axios to send perfect application/x-www-form-urlencoded data
-    const params = new URLSearchParams();
-    params.append('url', url);
+    // Manually construct the exact URL-encoded string so PHP is guaranteed to parse it
+    let payload = `url=${encodeURIComponent(url)}&link=${encodeURIComponent(url)}`;
+    if (token) {
+      payload += `&token=${encodeURIComponent(token)}&_token=${encodeURIComponent(token)}&csrf_token=${encodeURIComponent(token)}`;
+    }
 
-    const apiRes = await axios.post('https://svxtract.com/apiv3.php', params, {
+    // Use native fetch to POST the data
+    const apiRes = await fetch('https://svxtract.com/apiv3.php', {
+      method: 'POST',
       headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64 ) AppleWebKit/537.36',
         'Origin': 'https://svxtract.com',
         'Referer': 'https://svxtract.com/',
         'Cookie': cookieString,
-        'X-Requested-With': 'XMLHttpRequest'
-      }
+        'X-Requested-With': 'XMLHttpRequest',
+        'Accept': 'application/json, text/javascript, */*; q=0.01'
+      },
+      body: payload
     } );
 
-    const data = apiRes.data;
-    console.log(`[5] API Response received!`);
+    const responseText = await apiRes.text();
+    console.log(`[5] API Response Status: ${apiRes.status}`);
+    
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      data = responseText;
+    }
     
     let videoUrl = '';
     let title = 'Shopee Video';
@@ -44,6 +69,10 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
 
     // Parse JSON response
     if (typeof data === 'object' && data !== null) {
+      if (data.error) {
+         console.log(`[!] API returned error: ${data.error}`);
+         throw new Error(`SVXtract API Error: ${data.error}`);
+      }
       videoUrl = data.video_url || data.url || data.download_url || data.src || data.hd_video;
       title = data.title || title;
       cover = data.thumbnail || data.cover || data.image || cover;
@@ -73,10 +102,6 @@ export async function extractShopeeVideo(url: string): Promise<VideoResult> {
   } catch (error: any) {
     console.error('\n========== SVXTRACT SCRAPER ERROR ==========');
     console.error(error.message);
-    if (error.response) {
-      console.error(`Status: ${error.response.status}`);
-      console.error(`Data:`, typeof error.response.data === 'string' ? error.response.data.substring(0, 200) : error.response.data);
-    }
     console.error('============================================\n');
     throw new Error('Failed to extract video using SVXtract. The service might be down or the URL is invalid.');
   }
